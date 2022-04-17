@@ -7,7 +7,7 @@ import requests
 import telegram
 from dotenv import load_dotenv
 
-import bot_exceptions as e
+import bot_exceptions
 
 load_dotenv()
 
@@ -27,8 +27,8 @@ logger.addHandler(handler)
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TELEGRAM_RETRY_TIME = 600
 
-RETRY_TIME = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
 
@@ -64,21 +64,24 @@ def get_api_answer(current_timestamp: int) -> dict:
     timestamp: int = current_timestamp or int(time.time())
     logger.debug(f'get_api_answer.timestamp = {timestamp}')
     params: dict = {'from_date': timestamp}
-    response = requests.get(
-        ENDPOINT,
-        params=params,
-        headers=HEADERS,
-    )
+    try:
+        response = requests.get(
+            ENDPOINT,
+            params=params,
+            headers=HEADERS,
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as err:
+        raise err
 
-    if response.status_code == 200:
-        logger.debug('-- response.json успешно получен и возвращен')
-        logger.debug(f'{response.json()}')
-        return response.json()
+    # if response.status_code != 200:
+    #     raise bot_exceptions.WrongAPIStatusCodeError(
+    #         'Сервер API вернул код отличный от 200.'
+    #     )
 
-    logger.error('Сервер API вернул код отличный от 200.')
-    raise e.WrongAPIStatusCodeError(
-        'Сервер API вернул код отличный от 200.'
-    )
+    logger.debug('-- response.json успешно получен и возвращен')
+    logger.debug(f'{response.json()}')
+    return response.json()
 
 
 def check_response(response) -> list:
@@ -89,25 +92,22 @@ def check_response(response) -> list:
     доступный в ответе API по ключу 'homeworks'.
     """
     logger.debug(f'check_response.response = {response}')
-    API_key1: str = 'homeworks'
-    API_key2: str = 'current_date'
+    API_KEY_1: str = 'homeworks'
+    API_KEY_2: str = 'current_date'
 
     if not isinstance(response, dict):
-        logger.error('Ответ от API имеет некорректный тип.')
-        raise e.WrongAPIResponseTypeError(
+        raise bot_exceptions.WrongAPIResponseTypeError(
             'Ответ от API имеет некорректный тип.'
         )
-    if API_key1 in response and API_key2 in response:
-        if not isinstance(response.get(API_key1), list):
-            logger.error('Ответ от API имеет некорректный тип.')
-            raise e.WrongAPIResponseTypeError(
+    if API_KEY_1 in response and API_KEY_2 in response:
+        if not isinstance(response.get(API_KEY_1), list):
+            raise bot_exceptions.WrongAPIResponseTypeError(
                 'Ответ от API имеет некорректный тип.'
             )
         logger.debug('-- response успешно проверен и возвращен')
-        return response.get(API_key1)
+        return response.get(API_KEY_1)
 
-    logger.error('API вернул не верный ответ')
-    raise e.WrongAPIResponseError(
+    raise bot_exceptions.WrongAPIResponseError(
         'API вернул не верный ответ.'
     )
 
@@ -126,15 +126,13 @@ def parse_status(homework: dict) -> str:
     homework_name: str = homework.get('homework_name')
     homework_status: str = homework.get('status')
 
+    if homework_status not in HOMEWORK_STATUSES:
+        raise bot_exceptions.WrongHomeworkStatusError(
+            'Неожиданный статус домашней работы.'
+        )
     verdict: str = HOMEWORK_STATUSES.get(homework_status)
-    if verdict:
-        logger.debug('-- вернули подготовленное сообщение')
-        return f'Изменился статус проверки работы "{homework_name}". {verdict}'
-
-    logger.error('Неожиданный статус домашней работы.')
-    raise e.WrongHomeworkStatusError(
-        'Неожиданный статус домашней работы.'
-    )
+    logger.debug('-- вернули подготовленное сообщение')
+    return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
 def check_tokens() -> bool:
@@ -148,6 +146,11 @@ def check_tokens() -> bool:
         logger.debug('check_tokens = True')
         return True
     logger.debug('check_tokens = False')
+    logger.critical(
+        f'\n>>> TELEGRAM_TOKEN = {bool(TELEGRAM_TOKEN)}'
+        f'\n>>> TELEGRAM_CHAT_ID = {bool(TELEGRAM_CHAT_ID)}'
+        f'\n>>> PRACTICUM_TOKEN = {bool(PRACTICUM_TOKEN)}'
+    )
     return False
 
 
@@ -164,7 +167,9 @@ def logic(bot: telegram.Bot, current_timestamp: int) -> None:
             message = parse_status(homework)
             send_message(bot, message)
     else:
-        logger.debug('Новых данных о работах нет.')
+        logger.debug(
+            f'{current_timestamp} | Новых данных о работах нет.'
+        )
 
 
 def main():
@@ -184,39 +189,26 @@ def main():
     current_timestamp: int = int(time.time())
 
     if not check_tokens():
-        message = 'Нет одного из токенов'
-        try:
-            bot = telegram.Bot(token=TELEGRAM_TOKEN)
-            send_message(bot, message)
-            logger.critical('Отсутствует токен! Отправлена Телеграмма!')
-        except Exception as error:
-            logger.critical(
-                f'Отсутствует токен! Телеграмма не отправилась!\n{error}'
-            )
-        logger.critical('Работа бота остановлена!')
         raise SystemExit(1)
-    else:
-        bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-    try:
-        get_api_answer(current_timestamp)
-    except Exception as error:
-        message = f'Ошибка проверки доступа к АПИ!\n{error}'
-        logger.error(message)
-        send_message(bot, message)
+    bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
+    telegramm_send_an_error_message = True
     while True:
         logger.debug('\n<-------- New iteration -------->')
         try:
             logic(bot, current_timestamp)
         except Exception as error:
             logger.debug('-- main.while.except')
-            message = f'Сбой в работе программы: {error}'
-            logger.error(error)
-            time.sleep(RETRY_TIME)
+            message = f'Сбой в работе программы:\n{error}'
+            logger.error(message)
+            if telegramm_send_an_error_message:
+                send_message(bot, message)
+                telegramm_send_an_error_message = False
         else:
             current_timestamp = int(time.time())
-            time.sleep(RETRY_TIME)
+        finally:
+            time.sleep(TELEGRAM_RETRY_TIME)
         logger.debug('\n<-------- Iteration done-------->')
 
 
