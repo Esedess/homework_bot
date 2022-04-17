@@ -70,14 +70,13 @@ def get_api_answer(current_timestamp: int) -> dict:
             params=params,
             headers=HEADERS,
         )
-        response.raise_for_status()
     except requests.exceptions.RequestException as err:
         raise err
 
-    # if response.status_code != 200:
-    #     raise bot_exceptions.WrongAPIStatusCodeError(
-    #         'Сервер API вернул код отличный от 200.'
-    #     )
+    if response.status_code != 200:
+        raise bot_exceptions.WrongAPIStatusCodeError(
+            'Сервер API вернул код отличный от 200.'
+        )
 
     logger.debug('-- response.json успешно получен и возвращен')
     logger.debug(f'{response.json()}')
